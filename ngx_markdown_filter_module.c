@@ -26,6 +26,8 @@ typedef struct {
     u_char *footer;
     ngx_int_t header_len;
     ngx_int_t footer_len;
+    ngx_flag_t unsafe;
+    ngx_flag_t gfm_tagfilter_enabled;
 } ngx_markdown_filter_conf_t;
 
 
@@ -33,6 +35,7 @@ typedef struct {
 
 typedef struct {
     cmark_parser *parser;
+    cmark_llist *extensions;
 } ngx_markdown_filter_ctx_t;
 
 
@@ -47,6 +50,8 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
 static ngx_int_t ngx_markdown_filter_init(ngx_conf_t *cf);
 
 static void cmark_parser_cleanup(void *parser);
+
+static void cmark_extensions_cleanup(void *data);
 
 static char *ngx_conf_set_template(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
@@ -68,6 +73,20 @@ static ngx_command_t ngx_markdown_filter_commands[] = {
       0, // unused
       NULL },
 
+    { ngx_string("markdown_unsafe"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_markdown_filter_conf_t, unsafe),
+      NULL },
+
+    { ngx_string("markdown_gfm_tagfilter"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_markdown_filter_conf_t, gfm_tagfilter_enabled),
+      NULL },
+
       ngx_null_command
 };
 
@@ -84,7 +103,6 @@ static ngx_http_module_t  ngx_markdown_filter_module_ctx = {
     NULL,                                  /* create server configuration */
     NULL,                                  /* merge server configuration */
 
-    // TODO create conf functions
     ngx_markdown_filter_create_conf,       /* create location configuration */
     ngx_markdown_filter_merge_conf         /* merge location configuration */
 };
@@ -113,8 +131,6 @@ static char *ngx_conf_set_template(ngx_conf_t *cf, ngx_command_t *cmd, void *con
     ngx_str_t *value = cf->args->elts;
     ngx_str_t filename = value[1];
     ngx_markdown_filter_conf_t *markdown_conf = (ngx_markdown_filter_conf_t *) conf;
-
-    // TODO read template file from provided filename and parse it
 
     ngx_fd_t fd = ngx_open_file(filename.data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
     if (fd == NGX_INVALID_FILE) {
@@ -175,6 +191,8 @@ static void *ngx_markdown_filter_create_conf(ngx_conf_t *cf)
     conf->footer = NGX_CONF_UNSET_PTR;
     conf->header_len = NGX_CONF_UNSET;
     conf->footer_len = NGX_CONF_UNSET;
+    conf->unsafe = NGX_CONF_UNSET;
+    conf->gfm_tagfilter_enabled = NGX_CONF_UNSET;
     return conf;
 }
 
@@ -188,6 +206,8 @@ static char *ngx_markdown_filter_merge_conf(ngx_conf_t *cf, void *parent, void *
     ngx_conf_merge_ptr_value(conf->footer, prev->footer, NULL);
     ngx_conf_merge_value(conf->header_len, prev->header_len, 0);
     ngx_conf_merge_value(conf->footer_len, prev->footer_len, 0);
+    ngx_conf_merge_value(conf->unsafe, prev->unsafe, 0);
+    ngx_conf_merge_value(conf->gfm_tagfilter_enabled, prev->gfm_tagfilter_enabled, 0);
     return NGX_CONF_OK;
 }
 
@@ -207,10 +227,21 @@ static ngx_int_t ngx_markdown_filter_init(ngx_conf_t *cf)
 
 static void cmark_parser_cleanup(void *data)
 {
+    if (data == NULL) {
+        return;
+    }
     cmark_parser *parser = data;
     cmark_parser_free(parser);
 }
 
+static void cmark_extensions_cleanup(void *data)
+{
+    if (data == NULL) {
+        return;
+    }
+    cmark_llist *extensions = data;
+    cmark_llist_free(cmark_get_default_mem_allocator(), extensions);
+}
 
 static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
 {
@@ -220,29 +251,50 @@ static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
         if (ctx == NULL) {
             return NGX_ERROR;
         }
-
-        cmark_parser *parser = cmark_parser_new(CMARK_OPT_DEFAULT);
+        int cmark_opts = lc->unsafe ? CMARK_OPT_UNSAFE : CMARK_OPT_DEFAULT;
+        cmark_parser *parser = cmark_parser_new(cmark_opts);
         if (parser == NULL) {
             return NGX_ERROR;
         }
 
+        cmark_llist *extensions = NULL;
+
 #ifdef WITH_CMARK_GFM
         cmark_gfm_core_extensions_ensure_registered();
-        cmark_syntax_extension *ext = cmark_find_syntax_extension("table");
-        if (ext != NULL) {
-            cmark_parser_attach_syntax_extension(parser, ext);
+        cmark_syntax_extension *ext_table = cmark_find_syntax_extension("table");
+        if (ext_table != NULL) {
+            cmark_parser_attach_syntax_extension(parser, ext_table);
+        }
+
+        if (lc->gfm_tagfilter_enabled) {
+            cmark_syntax_extension *ext_tagfilter = cmark_find_syntax_extension("tagfilter");
+            if (ext_tagfilter != NULL) {
+                extensions = cmark_llist_append(cmark_get_default_mem_allocator(), NULL, ext_tagfilter);
+                cmark_parser_attach_syntax_extension(parser, ext_tagfilter);
+            }
         }
 #endif
 
         ctx->parser = parser;
+        ctx->extensions = extensions;
 
-        ngx_pool_cleanup_t *cln = ngx_pool_cleanup_add(r->pool, 0);
-        if (cln == NULL) {
+        ngx_pool_cleanup_t *cln_parser = ngx_pool_cleanup_add(r->pool, 0);
+        if (cln_parser == NULL) {
             cmark_parser_cleanup(parser);
             return NGX_ERROR;
         }
-        cln->handler = cmark_parser_cleanup;
-        cln->data = parser;
+        cln_parser->handler = cmark_parser_cleanup;
+        cln_parser->data = parser;
+
+        if (extensions != NULL) {
+            ngx_pool_cleanup_t *cln_extensions = ngx_pool_cleanup_add(r->pool, 0);
+            if (cln_extensions == NULL) {
+                cmark_extensions_cleanup(extensions);
+                return NGX_ERROR;
+            }
+            cln_extensions->handler = cmark_extensions_cleanup;
+            cln_extensions->data = extensions;
+        }
 
         ngx_http_set_ctx(r, ctx, ngx_markdown_filter_module);
 
@@ -280,6 +332,8 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
         return NGX_ERROR;
     }
 
+    cmark_llist *extensions = ctx->extensions;
+
     int last = 0;
     for (ngx_chain_t *cl = chain; cl; cl = cl->next) {
         ngx_buf_t *buf = cl->buf;
@@ -295,11 +349,12 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
     }
     if (last) {
         cmark_node *root = cmark_parser_finish(parser);
+        int cmark_opts = lc->unsafe ? CMARK_OPT_UNSAFE : CMARK_OPT_DEFAULT;
 
 #ifdef WITH_CMARK_GFM
-        char *html = cmark_render_html(root, CMARK_OPT_DEFAULT, NULL);
+        char *html = cmark_render_html(root, cmark_opts, extensions);
 #else
-        char *html = cmark_render_html(root, CMARK_OPT_DEFAULT);
+        char *html = cmark_render_html(root, cmark_opts);
 #endif
 
         cmark_node_free(root); // remove document tree

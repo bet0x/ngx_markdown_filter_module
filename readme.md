@@ -27,6 +27,18 @@ Syntax:  markdown_template html/template.html;
 Context: location
 ```
 
+```
+# enable `unsafe` mode for cmark
+Syntax:  markdown_unsafe on;
+Context: location;
+```
+
+```
+# enable `tagfilter` extension for cmark-gfm
+Syntax:  markdown_gfm_tagfilter on;
+Context: location;
+```
+
 ### Build
 
 1. Clone this repo
@@ -57,15 +69,15 @@ fork with table extension, supported by Github.
 
 2. Rename `config_gfm` to `config`
 
-2. Install `cmark-gfm` lib
+3. Install `cmark-gfm` lib
 
-3. Download [nginx src archive](http://nginx.org/en/download.html) and unpack it
+4. Download [nginx src archive](http://nginx.org/en/download.html) and unpack it
 
-4. Run `configure` script (see nginx src) and build nginx
+5. Run `configure` script (see nginx src) and build nginx
 
 ```
 > ./configure --add-module=/path/to/ngx_markdown_filter_module --with-cc-opt=-DWITH_CMARK_GFM=1
 > make
 ```
 
-5. Apply markdown directives to nginx conf and run it
+6. Apply markdown directives to nginx conf and run it

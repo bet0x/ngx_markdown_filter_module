@@ -28,6 +28,9 @@ typedef struct {
     ngx_int_t footer_len;
     ngx_flag_t unsafe;
     ngx_flag_t gfm_tagfilter_enabled;
+    ngx_flag_t gfm_tasklist_enabled;
+    ngx_flag_t gfm_strikethrough_enabled;
+    ngx_flag_t gfm_autolink_enabled;
 } ngx_markdown_filter_conf_t;
 
 
@@ -85,6 +88,27 @@ static ngx_command_t ngx_markdown_filter_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_markdown_filter_conf_t, gfm_tagfilter_enabled),
+      NULL },
+
+    { ngx_string("markdown_gfm_tasklist"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_markdown_filter_conf_t, gfm_tasklist_enabled),
+      NULL },
+
+    { ngx_string("markdown_gfm_strikethrough"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_markdown_filter_conf_t, gfm_strikethrough_enabled),
+      NULL },
+
+    { ngx_string("markdown_gfm_autolink"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_markdown_filter_conf_t, gfm_autolink_enabled),
       NULL },
 
       ngx_null_command
@@ -193,6 +217,9 @@ static void *ngx_markdown_filter_create_conf(ngx_conf_t *cf)
     conf->footer_len = NGX_CONF_UNSET;
     conf->unsafe = NGX_CONF_UNSET;
     conf->gfm_tagfilter_enabled = NGX_CONF_UNSET;
+    conf->gfm_tasklist_enabled = NGX_CONF_UNSET;
+    conf->gfm_strikethrough_enabled = NGX_CONF_UNSET;
+    conf->gfm_autolink_enabled = NGX_CONF_UNSET;
     return conf;
 }
 
@@ -208,6 +235,9 @@ static char *ngx_markdown_filter_merge_conf(ngx_conf_t *cf, void *parent, void *
     ngx_conf_merge_value(conf->footer_len, prev->footer_len, 0);
     ngx_conf_merge_value(conf->unsafe, prev->unsafe, 0);
     ngx_conf_merge_value(conf->gfm_tagfilter_enabled, prev->gfm_tagfilter_enabled, 0);
+    ngx_conf_merge_value(conf->gfm_tasklist_enabled, prev->gfm_tasklist_enabled, 0);
+    ngx_conf_merge_value(conf->gfm_strikethrough_enabled, prev->gfm_strikethrough_enabled, 0);
+    ngx_conf_merge_value(conf->gfm_autolink_enabled, prev->gfm_autolink_enabled, 0);
     return NGX_CONF_OK;
 }
 
@@ -269,8 +299,32 @@ static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
         if (lc->gfm_tagfilter_enabled) {
             cmark_syntax_extension *ext_tagfilter = cmark_find_syntax_extension("tagfilter");
             if (ext_tagfilter != NULL) {
-                extensions = cmark_llist_append(cmark_get_default_mem_allocator(), NULL, ext_tagfilter);
+                extensions = cmark_llist_append(cmark_get_default_mem_allocator(), extensions, ext_tagfilter);
                 cmark_parser_attach_syntax_extension(parser, ext_tagfilter);
+            }
+        }
+
+        if (lc->gfm_tasklist_enabled) {
+            cmark_syntax_extension *ext_tasklist = cmark_find_syntax_extension("tasklist");
+            if (ext_tasklist != NULL) {
+                extensions = cmark_llist_append(cmark_get_default_mem_allocator(), extensions, ext_tasklist);
+                cmark_parser_attach_syntax_extension(parser, ext_tasklist);
+            }
+        }
+
+        if (lc->gfm_strikethrough_enabled) {
+            cmark_syntax_extension *ext_strikethrough = cmark_find_syntax_extension("strikethrough");
+            if (ext_strikethrough != NULL) {
+                extensions = cmark_llist_append(cmark_get_default_mem_allocator(), extensions, ext_strikethrough);
+                cmark_parser_attach_syntax_extension(parser, ext_strikethrough);
+            }
+        }
+
+        if (lc->gfm_autolink_enabled) {
+            cmark_syntax_extension *ext_autolink = cmark_find_syntax_extension("autolink");
+            if (ext_autolink != NULL) {
+                extensions = cmark_llist_append(cmark_get_default_mem_allocator(), extensions, ext_autolink);
+                cmark_parser_attach_syntax_extension(parser, ext_autolink);
             }
         }
 #endif

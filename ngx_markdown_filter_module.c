@@ -38,7 +38,9 @@ typedef struct {
 
 typedef struct {
     cmark_parser *parser;
+#ifdef WITH_CMARK_GFM
     cmark_llist *extensions;
+#endif
 } ngx_markdown_filter_ctx_t;
 
 
@@ -54,7 +56,9 @@ static ngx_int_t ngx_markdown_filter_init(ngx_conf_t *cf);
 
 static void cmark_parser_cleanup(void *parser);
 
+#ifdef WITH_CMARK_GFM
 static void cmark_extensions_cleanup(void *data);
+#endif
 
 static char *ngx_conf_set_template(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
@@ -264,6 +268,7 @@ static void cmark_parser_cleanup(void *data)
     cmark_parser_free(parser);
 }
 
+#ifdef WITH_CMARK_GFM
 static void cmark_extensions_cleanup(void *data)
 {
     if (data == NULL) {
@@ -272,6 +277,7 @@ static void cmark_extensions_cleanup(void *data)
     cmark_llist *extensions = data;
     cmark_llist_free(cmark_get_default_mem_allocator(), extensions);
 }
+#endif
 
 static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
 {
@@ -287,9 +293,8 @@ static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
             return NGX_ERROR;
         }
 
-        cmark_llist *extensions = NULL;
-
 #ifdef WITH_CMARK_GFM
+        cmark_llist *extensions = NULL;
         cmark_gfm_core_extensions_ensure_registered();
         cmark_syntax_extension *ext_table = cmark_find_syntax_extension("table");
         if (ext_table != NULL) {
@@ -330,7 +335,9 @@ static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
 #endif
 
         ctx->parser = parser;
+#ifdef WITH_CMARK_GFM
         ctx->extensions = extensions;
+#endif
 
         ngx_pool_cleanup_t *cln_parser = ngx_pool_cleanup_add(r->pool, 0);
         if (cln_parser == NULL) {
@@ -340,6 +347,7 @@ static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
         cln_parser->handler = cmark_parser_cleanup;
         cln_parser->data = parser;
 
+#ifdef WITH_CMARK_GFM
         if (extensions != NULL) {
             ngx_pool_cleanup_t *cln_extensions = ngx_pool_cleanup_add(r->pool, 0);
             if (cln_extensions == NULL) {
@@ -349,6 +357,7 @@ static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
             cln_extensions->handler = cmark_extensions_cleanup;
             cln_extensions->data = extensions;
         }
+#endif
 
         ngx_http_set_ctx(r, ctx, ngx_markdown_filter_module);
 
@@ -386,7 +395,9 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
         return NGX_ERROR;
     }
 
+#ifdef WITH_CMARK_GFM
     cmark_llist *extensions = ctx->extensions;
+#endif
 
     int last = 0;
     for (ngx_chain_t *cl = chain; cl; cl = cl->next) {

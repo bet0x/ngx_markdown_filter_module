@@ -190,15 +190,13 @@ static char *ngx_conf_set_template(ngx_conf_t *cf, ngx_command_t *cmd, void *con
 
     ngx_close_file(fd);
 
-    for (ngx_int_t i = 0; i < n; i++) {
-        if (template[i] == '{' && template[i+1] == '{') {
+    // find {{content}} specifically, leaving other placeholders (e.g. {{title}}) intact
+    for (ngx_int_t i = 0; i <= n - 11; i++) {
+        if (ngx_memcmp(template + i, "{{content}}", 11) == 0) {
             template[i] = '\0';
             markdown_conf->header = template;
-            markdown_conf->header_len = ngx_strlen(template);
-            continue;
-        }
-        if (template[i] == '}' && template[i+1] == '}') {
-            markdown_conf->footer = template + (i+2); // Note!! pointer arithmetic
+            markdown_conf->header_len = i;
+            markdown_conf->footer = template + i + 11;
             markdown_conf->footer_len = ngx_strlen(markdown_conf->footer);
             break;
         }
@@ -278,6 +276,128 @@ static void cmark_extensions_cleanup(void *data)
     cmark_llist_free(cmark_get_default_mem_allocator(), extensions);
 }
 #endif
+
+// Extract plain text from first <h1> in rendered HTML, stripping inner tags.
+static size_t
+extract_h1_title(const char *html, size_t html_len, char *out, size_t out_size)
+{
+    const char *p, *end, *h1_start;
+    size_t len = 0;
+    int in_tag = 0;
+
+    end = html + html_len;
+
+    for (p = html; p + 3 < end; p++) {
+        if (p[0] == '<' && p[1] == 'h' && p[2] == '1'
+            && (p[3] == '>' || p[3] == ' '))
+        {
+            p += 3;
+            while (p < end && *p != '>') p++;
+            if (p < end) p++;
+            h1_start = p;
+            goto found;
+        }
+    }
+    return 0;
+
+found:
+    for (p = h1_start; p + 4 < end; p++) {
+        if (p[0] == '<' && p[1] == '/' && p[2] == 'h' && p[3] == '1'
+            && p[4] == '>')
+        {
+            break;
+        }
+        if (*p == '<') { in_tag = 1; continue; }
+        if (*p == '>') { in_tag = 0; continue; }
+        if (!in_tag && len < out_size - 1) {
+            out[len++] = *p;
+        }
+    }
+
+    out[len] = '\0';
+    return len;
+}
+
+
+// Fallback: derive title from URI filename without .md extension.
+static size_t
+extract_uri_title(ngx_str_t *uri, char *out, size_t out_size)
+{
+    u_char *last_slash = NULL;
+    u_char *p;
+
+    for (p = uri->data; p < uri->data + uri->len; p++) {
+        if (*p == '/') last_slash = p;
+    }
+
+    u_char *start = last_slash ? last_slash + 1 : uri->data;
+    u_char *end = uri->data + uri->len;
+
+    if (end - start > 3
+        && end[-3] == '.' && end[-2] == 'm' && end[-1] == 'd')
+    {
+        end -= 3;
+    }
+
+    size_t len = end - start;
+    if (len >= out_size) len = out_size - 1;
+
+    ngx_memcpy(out, start, len);
+    out[len] = '\0';
+
+    for (size_t i = 0; i < len; i++) {
+        if (out[i] == '-') out[i] = ' ';
+    }
+
+    return len;
+}
+
+
+// Replace all {{title}} in a template buffer. Returns original pointer if none found.
+static u_char *
+replace_title_placeholder(ngx_pool_t *pool, u_char *tmpl, ngx_int_t tmpl_len,
+                          const char *title, size_t title_len,
+                          ngx_int_t *result_len)
+{
+    int count = 0;
+    ngx_int_t i;
+
+    for (i = 0; i <= tmpl_len - 9; i++) {
+        if (ngx_memcmp(tmpl + i, "{{title}}", 9) == 0) {
+            count++;
+        }
+    }
+
+    if (count == 0) {
+        *result_len = tmpl_len;
+        return tmpl;
+    }
+
+    ngx_int_t new_len = tmpl_len + count * ((ngx_int_t)title_len - 9);
+    u_char *result = ngx_pnalloc(pool, new_len);
+    if (result == NULL) {
+        *result_len = tmpl_len;
+        return tmpl;
+    }
+
+    u_char *dst = result;
+    u_char *src = tmpl;
+    u_char *src_end = tmpl + tmpl_len;
+
+    while (src < src_end) {
+        if (src + 9 <= src_end && ngx_memcmp(src, "{{title}}", 9) == 0) {
+            ngx_memcpy(dst, title, title_len);
+            dst += title_len;
+            src += 9;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+
+    *result_len = dst - result;
+    return result;
+}
+
 
 static ngx_int_t ngx_markdown_header_filter(ngx_http_request_t *r)
 {
@@ -437,11 +557,24 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
         cln->handler = ngx_free;
         cln->data = html;
 
+        // extract title from rendered HTML, fallback to URI filename
+        char title_buf[512];
+        size_t title_len = extract_h1_title(html, strlen(html),
+                                            title_buf, sizeof(title_buf));
+        if (title_len == 0) {
+            title_len = extract_uri_title(&r->uri, title_buf, sizeof(title_buf));
+        }
+
         ngx_chain_t *out_chain = NULL;
 
-        // add header
+        // add header (with {{title}} replacement)
 
         if (lc->header != NULL) {
+            ngx_int_t hdr_len;
+            u_char *hdr = replace_title_placeholder(r->pool,
+                              lc->header, lc->header_len,
+                              title_buf, title_len, &hdr_len);
+
             out_chain = ngx_alloc_chain_link(r->pool);
             if (out_chain == NULL) {
                 return NGX_ERROR;
@@ -450,9 +583,9 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
             if (header_buf == NULL) {
                 return NGX_ERROR;
             }
-            header_buf->pos = lc->header;
-            header_buf->last = header_buf->pos + lc->header_len;
-            header_buf->memory = 1; // Set readonly flag, and do not create copy of lc->header
+            header_buf->pos = hdr;
+            header_buf->last = hdr + hdr_len;
+            header_buf->memory = 1;
             header_buf->last_buf = 0;
             header_buf->last_in_chain = 0;
 
@@ -488,9 +621,14 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
             out_chain->next = content_chain;
         }
 
-        // add footer
+        // add footer (with {{title}} replacement)
 
         if (!footer_missing) {
+            ngx_int_t ftr_len;
+            u_char *ftr = replace_title_placeholder(r->pool,
+                              lc->footer, lc->footer_len,
+                              title_buf, title_len, &ftr_len);
+
             ngx_chain_t *footer_chain = ngx_alloc_chain_link(r->pool);
             if (footer_chain == NULL) {
                 return NGX_ERROR;
@@ -499,9 +637,9 @@ static ngx_int_t ngx_markdown_body_filter(ngx_http_request_t *r, ngx_chain_t *ch
             if (footer_buf == NULL) {
                 return NGX_ERROR;
             }
-            footer_buf->pos = lc->footer;
-            footer_buf->last = footer_buf->pos + lc->footer_len;
-            footer_buf->memory = 1; // Set readonly flag, and do not create copy of lc->footer
+            footer_buf->pos = ftr;
+            footer_buf->last = ftr + ftr_len;
+            footer_buf->memory = 1;
             footer_buf->last_buf = 1;
             footer_buf->last_in_chain = 1;
 
